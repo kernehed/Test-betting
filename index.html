@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Spelloggen</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/supabase/2.38.0/supabase.min.js"></script>
+<style>
+  :root {
+    --bg: #F5F3EE;
+    --card: #FFFFFF;
+    --border: #E3DED2;
+    --text: #2B2A28;
+    --muted: #8A8478;
+    --faint: #ABA59A;
+    --accent: #B8862E;
+    --accent-text: #F5F3EE;
+    --green: #3F8F63;
+    --red: #B14B3F;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .serif { font-family: ui-serif, Georgia, serif; }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 24px 16px 64px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+  input, select {
+    width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 10px 12px; font-size: 14px; font-family: inherit;
+  }
+  button { cursor: pointer; border: none; font-family: inherit; }
+  .btn-accent {
+    background: var(--accent); color: var(--accent-text); border-radius: 6px;
+    padding: 12px; font-weight: 600; font-size: 14px; width: 100%;
+  }
+  .btn-link { background: none; color: var(--muted); font-size: 13px; text-decoration: underline; padding: 0; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  .row3 > * { flex: 1; min-width: 0; }
+  .muted { color: var(--muted); }
+  .faint { color: var(--faint); }
+  .small { font-size: 12px; }
+  .xsmall { font-size: 11px; }
+  .center { text-align: center; }
+  .error { color: var(--red); font-size: 13px; }
+  .notice { color: var(--accent); font-size: 13px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 11px;
+    padding: 2px 8px; border-radius: 20px; border: 1px solid var(--border); background: var(--bg);
+  }
+  .pill.active { border-color: var(--accent); background: rgba(184,134,46,0.12); color: var(--accent); }
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; text-align: center; gap: 8px; padding-top: 16px; border-top: 1px solid var(--border); margin-top: 16px; }
+  .bet-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .bet-actions button { font-size: 10px; padding: 5px 8px; border-radius: 6px; }
+  .win-btn { background: rgba(63,143,99,0.15); color: var(--green); }
+  .loss-btn { background: rgba(177,75,63,0.15); color: var(--red); }
+  .risk-bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; margin-top: 4px; }
+  .risk-fill { height: 100%; border-radius: 3px; }
+  .badge { font-size: 9px; padding: 2px 6px; border-radius: 6px; background: rgba(184,134,46,0.15); color: var(--accent); }
+  .hr { border-top: 1px solid var(--border); margin: 8px 0; }
+</style>
+</head>
+<body>
+<div id="app" class="wrap"><p class="muted center">Laddar...</p></div>
+
+<script>
+/* ============== KONFIGURATION — fyll i dessa två ============== */
+const SUPABASE_URL = "https://dsykwhxclispdfaibwvp.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_23VCdCHL3U-47eK47JjHSA_dpdAylYj";
+/* ================================================================ */
+
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+let state = {
+  session: null,
+  bankroll: null,   // { amount }
+  bets: [],
+  authMode: "login", // 'login' | 'signup'
+  authError: "",
+  formError: "",
+  bankrollInput: "",
+  editingBankroll: false,
+  form: emptyForm(),
+};
+
+function emptyForm() {
+  return {
+    date: new Date().toISOString().slice(0, 10),
+    desc: "", league: "", bookie: "",
+    odds: "", stake: "", prob: "",
+    betType: "normal", notes: "",
+  };
+}
+
+const app = document.getElementById("app");
+
+function setState(patch) {
+  state = { ...state, ...patch };
+  render();
+}
+
+// ---------- Data helpers ----------
+function profitOf(bet) {
+  if (bet.outcome === "win") return bet.stake * (bet.odds - 1);
+  if (bet.outcome === "loss") return bet.bet_type === "bonus" ? 0 : -bet.stake;
+  return 0;
+}
+
+function riskZone(pct) {
+  if (pct <= 0) return { label: "—", color: "var(--faint)", bar: "var(--border)" };
+  if (pct <= 3) return { label: "Bra zon", color: "var(--green)", bar: "var(--green)" };
+  if (pct <= 5) return { label: "Högt", color: "var(--accent)", bar: "var(--accent)" };
+  return { label: "För stort", color: "var(--red)", bar: "var(--red)" };
+}
+
+// ---------- Auth ----------
+async function handleAuthSubmit(e) {
+  e.preventDefault();
+  const email = document.getElementById("auth-email").value.trim();
+  const password = document.getElementById("auth-password").value;
+  if (!email || !password) return setState({ authError: "Fyll i e-post och lösenord." });
+
+  setState({ authError: "" });
+  const fn = state.authMode === "signup" ? "signUp" : "signInWithPassword";
+  const { data, error } = await supabase.auth[fn]({ email, password });
+  if (error) return setState({ authError: error.message });
+
+  if (state.authMode === "signup" && !data.session) {
+    return setState({ authError: "Konto skapat — kolla din e-post för att bekräfta, sen logga in." });
+  }
+  await loadAfterLogin(data.session);
+}
+
+async function handleLogout() {
+  await supabase.auth.signOut();
+  setState({ session: null, bankroll: null, bets: [] });
+}
+
+async function loadAfterLogin(session) {
+  setState({ session });
+  const { data: bankrollRow } = await supabase
+    .from("bankroll").select("*").eq("user_id", session.user.id).maybeSingle();
+  const { data: bets } = await supabase
+    .from("bets").select("*").eq("user_id", session.user.id).order("created_at", { ascending: false });
+  setState({ bankroll: bankrollRow || null, bets: bets || [] });
+}
+
+// ---------- Bankroll ----------
+async function handleSetBankroll() {
+  const val = parseFloat(state.bankrollInput.replace(",", "."));
+  if (isNaN(val) || val <= 0) return setState({ formError: "Skriv ett giltigt belopp." });
+  const { error } = await supabase.from("bankroll").upsert({
+    user_id: state.session.user.id, amount: val, updated_at: new Date().toISOString(),
+  });
+  if (error) return setState({ formError: "Kunde inte spara: " + error.message });
+  setState({ bankroll: { amount: val }, editingBankroll: false, bankrollInput: "", formError: "" });
+}
+
+async function adjustBankroll(delta) {
+  const next = state.bankroll.amount + delta;
+  await supabase.from("bankroll").update({ amount: next, updated_at: new Date().toISOString() })
+    .eq("user_id", state.session.user.id);
+  setState({ bankroll: { ...state.bankroll, amount: next } });
+}
+
+// ---------- Bets ----------
+async function handleAddEntry(e) {
+  e.preventDefault();
+  const f = state.form;
+  const odds = parseFloat(f.odds.replace(",", "."));
+  const stake = parseFloat(f.stake.replace(",", "."));
+  const prob = f.prob ? parseFloat(f.prob.replace(",", ".")) : null;
+
+  if (!f.desc.trim()) return setState({ formError: "Skriv vad spelet gäller." });
+  if (f.odds.trim() === "" || isNaN(odds) || odds <= 1) return setState({ formError: "Ogiltigt odds." });
+  if (f.stake.trim() === "" || isNaN(stake) || stake <= 0) return setState({ formError: "Ogiltig insats." });
+
+  const { data, error } = await supabase.from("bets").insert({
+    user_id: state.session.user.id,
+    date: f.date, description: f.desc.trim(), league: f.league.trim() || null,
+    bookie: f.bookie.trim() || null, odds, stake, prob, bet_type: f.betType,
+    notes: f.notes.trim() || null, outcome: "pending",
+  }).select().single();
+
+  if (error) return setState({ formError: "Kunde inte spara: " + error.message });
+  setState({ bets: [data, ...state.bets], form: emptyForm(), formError: "" });
+}
+
+async function settle(bet, outcome) {
+  const { error } = await supabase.from("bets").update({ outcome }).eq("id", bet.id);
+  if (error) return alert("Fel: " + error.message);
+  const updated = { ...bet, outcome };
+  const profit = profitOf(updated);
+  await adjustBankroll(profit);
+  setState({ bets: state.bets.map((b) => (b.id === bet.id ? updated : b)) });
+}
+
+async function deleteBet(bet) {
+  if (!confirm("Ta bort det här spelet permanent?")) return;
+  if (bet.outcome !== "pending") await adjustBankroll(-profitOf(bet));
+  await supabase.from("bets").delete().eq("id", bet.id);
+  setState({ bets: state.bets.filter((b) => b.id !== bet.id) });
+}
+
+// ---------- Rendering ----------
+function render() {
+  if (!state.session) return renderAuth();
+  if (!state.bankroll) return renderBankrollSetup();
+  return renderMain();
+}
+
+function renderAuth() {
+  app.innerHTML = `
+    <div style="min-height:80vh;display:flex;align-items:center;justify-content:center;">
+      <div style="width:100%;max-width:340px;">
+        <h1 class="serif center" style="font-size:24px;margin-bottom:4px;">📖 Spelloggen</h1>
+        <p class="muted center small" style="margin-bottom:20px;">Logga in för att se din logg på alla dina enheter.</p>
+        <form id="auth-form">
+          <input id="auth-email" type="email" placeholder="E-post" style="margin-bottom:8px;" />
+          <input id="auth-password" type="password" placeholder="Lösenord" style="margin-bottom:12px;" />
+          <button type="submit" class="btn-accent">${state.authMode === "signup" ? "Skapa konto" : "Logga in"}</button>
+        </form>
+        ${state.authError ? `<p class="error center" style="margin-top:10px;">${state.authError}</p>` : ""}
+        <p class="center small" style="margin-top:16px;">
+          <button class="btn-link" id="toggle-auth-mode">
+            ${state.authMode === "signup" ? "Har redan konto? Logga in" : "Inget konto? Skapa ett"}
+          </button>
+        </p>
+      </div>
+    </div>`;
+  document.getElementById("auth-form").addEventListener("submit", handleAuthSubmit);
+  document.getElementById("toggle-auth-mode").addEventListener("click", () =>
+    setState({ authMode: state.authMode === "signup" ? "login" : "signup", authError: "" })
+  );
+}
+
+function renderBankrollSetup() {
+  app.innerHTML = `
+    <div style="min-height:80vh;display:flex;align-items:center;justify-content:center;">
+      <div style="width:100%;max-width:340px;">
+        <h1 class="serif center" style="font-size:24px;margin-bottom:12px;">📖 Spelloggen</h1>
+        <p class="muted center small" style="margin-bottom:16px;">Skriv in din bankroll just nu. Det är basen alla insatser räknas mot.</p>
+        <div class="row">
+          <input id="bankroll-input" type="text" inputmode="decimal" placeholder="t.ex. 3200" value="${state.bankrollInput}" />
+          <button id="start-btn" class="btn-accent" style="width:auto;flex:0 0 auto;padding:10px 16px;">Starta</button>
+        </div>
+        ${state.formError ? `<p class="error center" style="margin-top:10px;">${state.formError}</p>` : ""}
+        <p class="center small" style="margin-top:20px;"><button class="btn-link" id="logout-btn">Logga ut</button></p>
+      </div>
+    </div>`;
+  document.getElementById("bankroll-input").addEventListener("input", (e) => (state.bankrollInput = e.target.value));
+  document.getElementById("start-btn").addEventListener("click", handleSetBankroll);
+  document.getElementById("logout-btn").addEventListener("click", handleLogout);
+}
+
+function renderMain() {
+  const settled = state.bets.filter((b) => b.outcome !== "pending");
+  const totalProfit = settled.reduce((s, b) => s + profitOf(b), 0);
+  const totalStaked = settled.reduce((s, b) => s + b.stake, 0);
+  const wins = settled.filter((b) => b.outcome === "win").length;
+  const winRate = settled.length ? (wins / settled.length) * 100 : null;
+  const roi = totalStaked > 0 ? (totalProfit / totalStaked) * 100 : null;
+  const pending = state.bets.filter((b) => b.outcome === "pending").length;
+
+  const f = state.form;
+  const liveStake = parseFloat((f.stake || "").replace(",", "."));
+  const liveOdds = parseFloat((f.odds || "").replace(",", "."));
+  const liveProb = f.prob ? parseFloat(f.prob.replace(",", ".")) : null;
+  const impliedProb = !isNaN(liveOdds) && liveOdds > 1 ? 100 / liveOdds : null;
+  const edge = liveProb !== null && impliedProb !== null ? liveProb - impliedProb : null;
+  const livePct = !isNaN(liveStake) && liveStake > 0 ? (liveStake / state.bankroll.amount) * 100 : 0;
+  const zone = riskZone(livePct);
+
+  app.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">
+      <span class="serif" style="font-size:20px;">📖 Spelloggen</span>
+    </div>
+    <p class="faint xsmall" style="margin-bottom:16px;">${state.session.user.email}
+      <button class="btn-link" id="logout-btn" style="margin-left:8px;">Logga ut</button>
+    </p>
+
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;">
+        <div>
+          <p class="muted xsmall" style="margin:0 0 4px;">Nuvarande bankroll</p>
+          ${state.editingBankroll ? `
+            <div class="row" style="max-width:200px;">
+              <input id="edit-bankroll-input" type="text" inputmode="decimal" value="${state.bankroll.amount}" style="font-family:ui-monospace,monospace;" />
+              <button id="save-bankroll-btn" class="btn-link" style="color:var(--green);width:auto;flex:0 0 auto;">Spara</button>
+            </div>
+          ` : `
+            <button id="edit-bankroll-btn" class="mono" style="background:none;border:none;font-size:26px;color:var(--text);padding:0;">
+              ${state.bankroll.amount.toLocaleString("sv-SE", { maximumFractionDigits: 0 })} kr
+            </button>
+          `}
+        </div>
+        ${pending > 0 ? `<span class="xsmall" style="color:var(--accent);">⏱ ${pending} väntar</span>` : ""}
+      </div>
+      <div class="stat-grid">
+        <div><p class="mono" style="font-size:18px;margin:0;">${settled.length}</p><p class="xsmall faint">Avgjorda spel</p></div>
+        <div><p class="mono" style="font-size:18px;margin:0;">${winRate === null ? "—" : winRate.toFixed(0) + "%"}</p><p class="xsmall faint">Träffprocent</p></div>
+        <div><p class="mono" style="font-size:18px;margin:0;color:${roi > 0 ? "var(--green)" : roi < 0 ? "var(--red)" : "var(--text)"};">${roi === null ? "—" : (roi > 0 ? "+" : "") + roi.toFixed(1) + "%"}</p><p class="xsmall faint">ROI</p></div>
+      </div>
+    </div>
+
+    <form id="bet-form" class="card">
+      <p class="muted xsmall" style="text-transform:uppercase;letter-spacing:0.04em;margin:0 0 10px;">Nytt spel</p>
+      <input id="f-desc" placeholder="Vad gäller spelet?" value="${f.desc}" style="margin-bottom:8px;" />
+      <div class="row" style="margin-bottom:8px;">
+        <input id="f-league" placeholder="Liga" value="${f.league}" />
+        <input id="f-bookie" placeholder="Bookie" value="${f.bookie}" />
+      </div>
+      <div class="row row3" style="margin-bottom:8px;">
+        <input id="f-date" type="date" value="${f.date}" class="mono" style="font-size:12px;" />
+        <input id="f-odds" inputmode="decimal" placeholder="Odds" value="${f.odds}" class="mono" style="font-size:12px;" />
+        <input id="f-stake" inputmode="decimal" placeholder="Insats kr" value="${f.stake}" class="mono" style="font-size:12px;" />
+      </div>
+      <div class="row" style="margin-bottom:8px;">
+        <button type="button" data-type="normal" class="pill bet-type-btn ${f.betType === "normal" ? "active" : ""}" style="flex:1;justify-content:center;">Vanligt</button>
+        <button type="button" data-type="bonus" class="pill bet-type-btn ${f.betType === "bonus" ? "active" : ""}" style="flex:1;justify-content:center;">Bonus / Free bet</button>
+      </div>
+      <input id="f-prob" inputmode="decimal" placeholder="Din sannolikhet % (frivilligt)" value="${f.prob}" style="margin-bottom:8px;" />
+      <input id="f-notes" placeholder="Noteringar (frivilligt)" value="${f.notes}" style="margin-bottom:8px;" />
+
+      ${liveStake > 0 && f.betType === "normal" ? `
+        <div style="margin-bottom:8px;">
+          <div style="display:flex;justify-content:space-between;" class="xsmall">
+            <span class="faint">${livePct.toFixed(1)}% av bankroll</span>
+            <span style="color:${zone.color};">${zone.label}</span>
+          </div>
+          <div class="risk-bar"><div class="risk-fill" style="width:${Math.min((livePct/8)*100,100)}%;background:${zone.bar};"></div></div>
+          ${edge !== null ? `<p class="xsmall faint" style="margin:4px 0 0;">Implicit sannolikhet: ${impliedProb.toFixed(1)}% · Edge: <span style="color:${edge>0?"var(--green)":"var(--red)"};">${edge>0?"+":""}${edge.toFixed(1)}%</span></p>` : ""}
+        </div>` : ""}
+      ${liveStake > 0 && f.betType === "bonus" && edge !== null ? `
+        <p class="xsmall faint" style="margin-bottom:8px;">Edge: <span style="color:${edge>0?"var(--green)":"var(--red)"};">${edge>0?"+":""}${edge.toFixed(1)}%</span> (implicit ${impliedProb.toFixed(1)}%)</p>` : ""}
+
+      ${state.formError ? `<p class="error xsmall" style="margin-bottom:8px;">${state.formError}</p>` : ""}
+      <button type="submit" class="btn-accent">+ Logga spelet</button>
+    </form>
+
+    <p class="muted xsmall" style="text-transform:uppercase;letter-spacing:0.04em;margin-bottom:10px;">Logg</p>
+    ${state.bets.length === 0 ? `<p class="faint small center" style="padding:24px 0;">Inga spel loggade ännu.</p>` : state.bets.map(betRow).join("")}
+
+    <p class="center" style="margin-top:24px;"><button id="reset-info-btn" class="btn-link">Om appen</button></p>
+  `;
+
+  // listeners
+  document.getElementById("logout-btn").addEventListener("click", handleLogout);
+  if (state.editingBankroll) {
+    document.getElementById("save-bankroll-btn").addEventListener("click", () => {
+      state.bankrollInput = document.getElementById("edit-bankroll-input").value;
+      handleSetBankroll();
+    });
+  } else {
+    document.getElementById("edit-bankroll-btn").addEventListener("click", () => setState({ editingBankroll: true }));
+  }
+  document.getElementById("bet-form").addEventListener("submit", handleAddEntry);
+  ["desc","league","bookie","date","odds","stake","prob","notes"].forEach((k) => {
+    document.getElementById("f-" + k).addEventListener("input", (e) => {
+      state.form = { ...state.form, [k]: e.target.value };
+      render();
+      document.getElementById("f-" + k).focus();
+    });
+  });
+  document.querySelectorAll(".bet-type-btn").forEach((btn) =>
+    btn.addEventListener("click", () => setState({ form: { ...state.form, betType: btn.dataset.type } }))
+  );
+  document.querySelectorAll("[data-settle]").forEach((btn) =>
+    btn.addEventListener("click", () => settle(state.bets.find((b) => b.id === btn.dataset.id), btn.dataset.settle))
+  );
+  document.querySelectorAll("[data-delete]").forEach((btn) =>
+    btn.addEventListener("click", () => deleteBet(state.bets.find((b) => b.id === btn.dataset.delete)))
+  );
+  document.getElementById("reset-info-btn").addEventListener("click", () =>
+    alert("Spelloggen — din privata bettingjournal.\\nVarje person har sitt eget konto och sin egen bankroll.\\nData följer dig mellan enheter via inloggningen.")
+  );
+}
+
+function betRow(b) {
+  const profit = profitOf(b);
+  const stakePct = state.bankroll ? (b.stake / state.bankroll.amount) * 100 : 0;
+  return `
+    <div class="card" style="margin-bottom:10px;padding:14px 16px;">
+      <div class="bet-row">
+        <div style="min-width:0;">
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <span class="small">${escapeHtml(b.description)}</span>
+            ${b.bet_type === "bonus" ? `<span class="badge">Bonus</span>` : ""}
+          </div>
+          <p class="xsmall faint mono" style="margin:2px 0 0;">${b.date} · odds ${b.odds} · ${b.stake.toLocaleString("sv-SE")} kr${b.prob ? ` · est. ${b.prob}%` : ""}</p>
+          ${(b.league || b.bookie) ? `<p class="xsmall faint" style="margin:2px 0 0;">${[b.league,b.bookie].filter(Boolean).join(" · ")}</p>` : ""}
+          ${b.notes ? `<p class="xsmall faint" style="margin:2px 0 0;font-style:italic;">${escapeHtml(b.notes)}</p>` : ""}
+        </div>
+        <div style="text-align:right;flex-shrink:0;">
+          ${b.outcome === "pending" ? `
+            <div class="bet-actions" style="display:flex;gap:6px;">
+              <button class="win-btn" data-settle="win" data-id="${b.id}">Vinst</button>
+              <button class="loss-btn" data-settle="loss" data-id="${b.id}">Förlust</button>
+            </div>` : `
+            <span class="mono small" style="color:${profit>=0?"var(--green)":"var(--red)"};">
+              ${profit>=0?"+":""}${profit.toLocaleString("sv-SE",{maximumFractionDigits:0})} kr
+            </span>`}
+        </div>
+      </div>
+      <div class="hr"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span class="xsmall faint">${stakePct.toFixed(1)}% av bankroll vid loggning</span>
+        <button data-delete="${b.id}" class="btn-link" style="color:var(--faint);">🗑</button>
+      </div>
+    </div>`;
+}
+
+function escapeHtml(s) {
+  return (s || "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+}
+
+// ---------- Boot ----------
+(async function init() {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (session) await loadAfterLogin(session);
+  else render();
+})();
+</script>
+</body>
+</html>
