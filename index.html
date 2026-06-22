@@ -433,9 +433,13 @@ function escapeHtml(s) {
 
 // ---------- Boot ----------
 (async function init() {
-  const { data: { session } } = await supabase.auth.getSession();
-  if (session) await loadAfterLogin(session);
-  else render();
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session) await loadAfterLogin(session);
+    else render();
+  } catch (e) {
+    app.innerHTML = `<div style="padding:20px;color:#B14B3F;font-family:monospace;font-size:13px;white-space:pre-wrap;">FEL vid start: ${e.message}</div>`;
+  }
 })();
 </script>
 </body>
