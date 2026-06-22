@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Spelloggen</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" crossorigin="anonymous"></script>
 <style>
   :root {
     --bg: #F5F3EE;
@@ -74,7 +74,21 @@ const SUPABASE_URL = "https://dsykwhxclispdfaibwvp.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRzeWt3aHhjbGlzcGRmYWlid3ZwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxMTg1NTksImV4cCI6MjA5NzY5NDU1OX0.Tv_VHPD0pzU9XN5pcOdL1tP9oCXlKxltI2HYGRU74-c";
 /* ================================================================ */
 
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const app = document.getElementById("app");
+
+window.addEventListener("error", (e) => {
+  app.innerHTML = `<div style="padding:20px;color:#B14B3F;font-family:monospace;font-size:13px;white-space:pre-wrap;">FEL: ${e.message || e.error}</div>`;
+});
+window.addEventListener("unhandledrejection", (e) => {
+  app.innerHTML = `<div style="padding:20px;color:#B14B3F;font-family:monospace;font-size:13px;white-space:pre-wrap;">FEL (promise): ${e.reason && e.reason.message ? e.reason.message : e.reason}</div>`;
+});
+
+let supabase;
+try {
+  supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+} catch (e) {
+  app.innerHTML = `<div style="padding:20px;color:#B14B3F;font-family:monospace;font-size:13px;white-space:pre-wrap;">FEL vid createClient: ${e.message}</div>`;
+}
 
 let state = {
   session: null,
@@ -96,8 +110,6 @@ function emptyForm() {
     betType: "normal", notes: "",
   };
 }
-
-const app = document.getElementById("app");
 
 function setState(patch) {
   state = { ...state, ...patch };
